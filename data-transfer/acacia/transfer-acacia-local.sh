@@ -2,81 +2,76 @@
 
 set -euo pipefail
 
-###########################################
-# Check rclone is installed
-###########################################
-
-if ! command -v rclone >/dev/null 2>&1; then
-    echo "ERROR: rclone is not installed or is not in your PATH."
-    echo
-    echo "Please install rclone first:"
-    echo "  https://rclone.org/downloads/"
-    echo
-    echo "or ensure it is available in your PATH."
-    exit 1
-fi
-
-echo "Using rclone: $(command -v rclone)"
-echo "Version: $(rclone version | head -n1)"
-echo
-
 usage() {
 cat << EOF
 
 ==============================================
-          RCLONE ACACIA COPY - LOCAL
+          RCLONE ACACIA TRANSFER
 ==============================================
 
 Usage:
-  bash transfer-acacia-local.sh [--dry-run] SOURCE RCLONE_PROFILE BUCKET_NAME DEST_PATH
+  bash transfer-acacia-local.sh [--dry-run] upload   SOURCE PROFILE BUCKET DEST_PATH
+  bash transfer-acacia-local.sh [--dry-run] download SOURCE PROFILE BUCKET DEST_PATH
 
 Arguments:
+  DIRECTION
+      upload or download
+
   SOURCE
-      Local file or directory to copy.
+      For upload:   local file or directory
+      For download: path inside the Acacia bucket
 
-  RCLONE_PROFILE
-      Name of the configured rclone profile.
-      Example:
-          pawsey1168
+  PROFILE
+      Rclone profile name
+      Example: pawsey1168
 
-  BUCKET_NAME
-      Existing Acacia bucket name.
-      Example:
-          pangenomes
+  BUCKET
+      Existing Acacia bucket name
+      Example: pangenomes
 
   DEST_PATH
-      Destination folder/path inside the bucket.
-      Example:
-          test_data/my_data/
-
-Options:
-  --dry-run
-      Preview the transfer without copying files.
+      For upload:   destination path inside the bucket
+      For download: local destination path
 
 Examples:
 
-  # Dry run
-  bash transfer-acacia-local.sh --dry-run \\
-      file_name.txt \\
-      pawsey1168 \\
-      pangenomes \\
-      test/my_data/
+  Upload one file:
+    bash transfer-acacia-local.sh upload \\
+        file_name.txt pawsey1168 pangenomes test/
 
-  # Real copy
-  bash transfer-acacia-local.sh \\
-      file_name.txt \\
-      pawsey1168 \\
-      pangenomes \\
-      test/my_data/
+  Upload one directory:
+    bash transfer-acacia-local.sh upload \\
+        results/ pawsey1168 pangenomes test/results/
 
-This copies to:
-  pawsey1168:pangenomes/test/my_data/
+  Download one file:
+    bash transfer-acacia-local.sh download \\
+        test/file_name.txt pawsey1168 pangenomes ./downloads/
+
+  Download one directory:
+    bash transfer-acacia-local.sh download \\
+        test/results/ pawsey1168 pangenomes ./downloads/results/
+
+  Dry run:
+    bash transfer-acacia-local.sh --dry-run upload \\
+        file_name.txt pawsey1168 pangenomes test/
 
 ==============================================
 
 EOF
 exit 1
 }
+
+###########################################
+# Check rclone exists
+###########################################
+
+if ! command -v rclone >/dev/null 2>&1; then
+    echo "ERROR: rclone is not installed or not in PATH."
+    exit 1
+fi
+
+echo "Using rclone: $(command -v rclone)"
+echo "Version: $(rclone version | head -n1)"
 
 ###########################################
 # Parse arguments
@@ -89,35 +84,25 @@ if [[ "${1:-}" == "--dry-run" ]]; then
     shift
 fi
 
-[[ $# -eq 4 ]] || usage
+[[ $# -eq 5 ]] || usage
 
-SOURCE="$1"
-PROFILE="$2"
-BUCKET="$3"
-DEST_PATH="$4"
-
-DEST="${PROFILE}:${BUCKET}/${DEST_PATH}"
+DIRECTION="$1"
+SOURCE="$2"
+PROFILE="$3"
+BUCKET="$4"
+DEST_PATH="$5"
 
 ###########################################
-# Checks
+# Check profile and bucket
 ###########################################
 
-if [[ ! -e "$SOURCE" ]]; then
-    echo "ERROR: Source does not exist:"
-    echo "  $SOURCE"
-    exit 1
-fi
-
+echo
 echo "Checking rclone profile: ${PROFILE}"
 
 if ! PROFILE_ERROR=$(rclone lsd "${PROFILE}:" 2>&1); then
     echo
     echo "ERROR: Cannot access rclone profile '${PROFILE}'."
-    echo
-    echo "rclone returned:"
-    echo "----------------------------------------"
     echo "$PROFILE_ERROR"
-    echo "----------------------------------------"
     echo
     echo "Configured profiles:"
     rclone listremotes || true
@@ -126,25 +111,72 @@ fi
 
 echo "Profile '${PROFILE}' is accessible."
 
+echo
 echo "Checking bucket exists: ${PROFILE}:${BUCKET}"
 
 if ! BUCKET_ERROR=$(rclone lsd "${PROFILE}:${BUCKET}" 2>&1); then
     echo
     echo "ERROR: Cannot access bucket '${BUCKET}' using profile '${PROFILE}'."
-    echo
-    echo "rclone returned:"
-    echo "----------------------------------------"
     echo "$BUCKET_ERROR"
-    echo "----------------------------------------"
     echo
-    echo "Available buckets for profile '${PROFILE}':"
+    echo "Available buckets:"
     rclone lsd "${PROFILE}:" || true
     exit 1
 fi
 
 echo "Bucket '${BUCKET}' is accessible."
 
-LOG="rclone_copy_$(date +%Y%m%d_%H%M%S).log"
+###########################################
+# Build source and destination
+###########################################
+
+case "$DIRECTION" in
+    upload)
+        if [[ ! -e "$SOURCE" ]]; then
+            echo "ERROR: Local source does not exist:"
+            echo "  $SOURCE"
+            exit 1
+        fi
+
+        SRC="$SOURCE"
+        DEST="${PROFILE}:${BUCKET}/${DEST_PATH}"
+        ;;
+
+    download)
+        SRC="${PROFILE}:${BUCKET}/${SOURCE}"
+        DEST="$DEST_PATH"
+
+        echo
+        echo "Checking remote source: $SRC"
+
+        if rclone lsf "$SRC" >/dev/null 2>&1; then
+            REMOTE_LIST=$(rclone lsf "$SRC" --recursive 2>/dev/null || true)
+        else
+            echo "ERROR: Cannot access remote source:"
+            echo "  $SRC"
+            exit 1
+        fi
+
+        if [[ -z "$REMOTE_LIST" ]]; then
+            echo "ERROR: Remote source appears empty or does not exist:"
+            echo "  $SRC"
+            echo
+            echo "Check available files with:"
+            echo "  rclone lsf ${PROFILE}:${BUCKET}/ --recursive | head"
+            exit 1
+        fi
+
+        echo "Remote source contains:"
+        echo "$REMOTE_LIST" | head
+        ;;
+
+    *)
+        echo "ERROR: Direction must be either 'upload' or 'download'."
+        usage
+        ;;
+esac
+
+LOG="rclone_${DIRECTION}_$(date +%Y%m%d_%H%M%S).log"
 
 ###########################################
 # Summary
@@ -152,14 +184,14 @@ LOG="rclone_copy_$(date +%Y%m%d_%H%M%S).log"
 
 echo
 echo "=============================================="
-echo "              RCLONE COPY"
+echo "              RCLONE TRANSFER"
 echo "=============================================="
 echo "Started          : $(date)"
-echo "Source           : $SOURCE"
+echo "Direction        : $DIRECTION"
+echo "Source           : $SRC"
+echo "Destination      : $DEST"
 echo "Profile          : $PROFILE"
 echo "Bucket           : $BUCKET"
-echo "Destination path : $DEST_PATH"
-echo "Full destination : $DEST"
 echo "Log file         : $LOG"
 
 if [[ -n "$DRY_RUN" ]]; then
@@ -171,10 +203,10 @@ fi
 echo "=============================================="
 
 ###########################################
-# Run rclone copy
+# Transfer
 ###########################################
 
-rclone copy "$SOURCE" "$DEST" \
+rclone copy "$SRC" "$DEST" \
     ${DRY_RUN} \
     --progress \
     --checksum \
@@ -193,7 +225,7 @@ if [[ -n "$DRY_RUN" ]]; then
     echo "Dry run completed successfully."
     echo "No files were copied."
 else
-    echo "Copy completed successfully."
+    echo "Transfer completed successfully."
 fi
 
 echo "Finished : $(date)"

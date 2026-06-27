@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=rclone_copy
+#SBATCH --job-name=rclone_transfer
 #SBATCH --partition=copy
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=1
@@ -10,10 +10,147 @@
 
 set -euo pipefail
 
+usage() {
+cat << EOF
+
+=========================================================
+           RCLONE ACACIA TRANSFER (SLURM)
+=========================================================
+
+Description
+-----------
+Transfer files or directories between the local filesystem
+and Pawsey Acacia object storage using rclone.
+
+Usage
+-----
+sbatch --account=<PROJECT> transfer-acacia.sbatch [--dry-run] \
+    <upload|download> SOURCE PROFILE BUCKET DEST_PATH
+
+Arguments
+---------
+upload | download
+    Direction of the transfer.
+
+SOURCE
+    upload:
+        Local file or directory.
+
+    download:
+        File or directory inside the Acacia bucket.
+
+PROFILE
+    Name of the configured rclone profile.
+
+    Example:
+        pawsey1168
+
+BUCKET
+    Existing Acacia bucket.
+
+    Example:
+        pangenomes
+
+DEST_PATH
+    upload:
+        Destination path inside the bucket.
+
+    download:
+        Local destination directory.
+
+Options
+-------
+--dry-run
+    Preview the transfer without copying any files.
+
+Examples
+--------
+
+Upload a file:
+
+    sbatch --account=pawsey1168 transfer-acacia.sbatch \
+        upload \
+        file.txt \
+        pawsey1168 \
+        pangenomes \
+        test/
+
+Upload a directory:
+
+    sbatch --account=pawsey1168 transfer-acacia.sbatch \
+        upload \
+        results/ \
+        pawsey1168 \
+        pangenomes \
+        analysis/run01/
+
+Download a file:
+
+    sbatch --account=pawsey1168 transfer-acacia.sbatch \
+        download \
+        analysis/run01/file.txt \
+        pawsey1168 \
+        pangenomes \
+        ./downloads/
+
+Download a directory:
+
+    sbatch --account=pawsey1168 transfer-acacia.sbatch \
+        download \
+        analysis/run01/ \
+        pawsey1168 \
+        pangenomes \
+        ./downloads/
+
+Preview an upload:
+
+    sbatch --account=pawsey1168 transfer-acacia.sbatch \
+        --dry-run \
+        upload \
+        results/ \
+        pawsey1168 \
+        pangenomes \
+        analysis/run01/
+
+Notes
+-----
+• PROFILE refers to the rclone remote (check with: rclone listremotes)
+
+• BUCKET must already exist.
+  List available buckets with:
+
+      rclone lsd <PROFILE>:
+
+• Destination folders inside the bucket are created automatically
+  if they do not already exist.
+
+• The script uses 'rclone copy', so existing files are updated,
+  but files are never deleted from the destination.
+
+=========================================================
+
+EOF
+exit 1
+}
+
+# Parse options
+DRY_RUN=""
+
+case "${1:-}" in
+    -h|--help)
+        usage
+        ;;
+    --dry-run)
+        DRY_RUN="--dry-run"
+        shift
+        ;;
+esac
+
+[[ $# -eq 5 ]] || usage
+
 ###########################################
 # Load rclone module
 ###########################################
-# load rclone module, based on available ones
 RCLONE_MODULE=$(module -t avail rclone 2>&1 | grep -oE 'rclone/[0-9][^[:space:]]+' | sort -V | tail -n1)
 
 if [[ -z "$RCLONE_MODULE" ]]; then
@@ -27,190 +164,18 @@ fi
 echo "Loading $RCLONE_MODULE"
 module load "$RCLONE_MODULE"
 
-usage() {
-cat << EOF
-
-==============================================
-              RCLONE ACACIA COPY ON SETONIX
-==============================================
-
-Usage:
-  sbatch --account=<YOUR_PROJECT> transfer-acacia.sbatch \\
-      [--dry-run] SOURCE RCLONE_PROFILE BUCKET_NAME DEST_PATH
-
-Arguments:
-  SOURCE
-      Local file or directory to copy.
-
-  RCLONE_PROFILE
-      Name of the configured rclone profile.
-      Example:
-          pawsey1168
-
-  BUCKET_NAME
-      Existing Acacia bucket name.
-      Example:
-          pangenomes
-
-  DEST_PATH
-      Destination folder/path inside the bucket.
-      Example:
-          test_data/my_data/
-
-Options:
-  --dry-run
-      Preview the transfer without copying files.
-
-Examples:
-
-  # Dry run
-  sbatch --account=pawsey1168 transfer-acacia.sbatch --dry-run \\
-      file_name.txt \\
-      pawsey1168 \\
-      pangenomes \\
-      test/my_data/
-
-  # Real copy
-  sbatch --account=pawsey1168 transfer-acacia.sbatch \\
-      file_name.txt \\
-      pawsey1168 \\
-      pangenomes \\
-      test/my_data/
-
-This copies to:
-  pawsey1168:pangenomes/test/my_data/
-
-Make sure pangenomes bucket exists, it can be created with
-rclone mkdir pawsey1168:pangenomes/
-==============================================
-
-EOF
-exit 1
-}
-
 ###########################################
-# Parse arguments
+# Run main transfer script
 ###########################################
 
-DRY_RUN=""
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 
-if [[ "${1:-}" == "--dry-run" ]]; then
-    DRY_RUN="--dry-run"
-    shift
-fi
-
-[[ $# -eq 4 ]] || usage
-
-SOURCE="$1"
-PROFILE="$2"
-BUCKET="$3"
-DEST_PATH="$4"
-
-DEST="${PROFILE}:${BUCKET}/${DEST_PATH}"
-
-###########################################
-# Checks
-###########################################
-
-if [[ ! -e "$SOURCE" ]]; then
-    echo "ERROR: Source does not exist:"
-    echo "  $SOURCE"
+if [[ ! -f "${SCRIPT_DIR}/transfer-acacia-local.sh" ]]; then
+    echo "ERROR: Cannot find transfer-acacia-local.sh in:"
+    echo "  ${SCRIPT_DIR}"
+    echo
+    echo "Make sure transfer-acacia-local.sh and transfer-acacia.sbatch are in the same directory."
     exit 1
 fi
 
-echo "Checking rclone profile: ${PROFILE}"
-
-if ! PROFILE_ERROR=$(rclone lsd "${PROFILE}:" 2>&1); then
-    echo
-    echo "ERROR: Cannot access rclone profile '${PROFILE}'."
-    echo
-    echo "rclone returned:"
-    echo "----------------------------------------"
-    echo "$PROFILE_ERROR"
-    echo "----------------------------------------"
-    echo
-    echo "Configured profiles:"
-    rclone listremotes || true
-    exit 1
-fi
-
-echo "Checking bucket exists: ${PROFILE}:${BUCKET}"
-
-if ! BUCKET_ERROR=$(rclone lsd "${PROFILE}:${BUCKET}" 2>&1); then
-    echo
-    echo "ERROR: Cannot access bucket '${BUCKET}' using profile '${PROFILE}'."
-    echo
-    echo "rclone returned:"
-    echo "----------------------------------------"
-    echo "$BUCKET_ERROR"
-    echo "----------------------------------------"
-    echo
-    echo "Available buckets for profile '${PROFILE}':"
-    rclone lsd "${PROFILE}:" || true
-    echo
-    echo "Important:"
-    echo "  '${BUCKET}' must be an existing Acacia bucket."
-    echo "  If you want a folder called '${DEST_PATH}', put it inside an existing bucket."
-    echo " This can be created with rclone mkdir, before executing the transfer "
-    echo
-    echo "Example:"
-    echo "  rclone mkdir ${PROFILE}:${BUCKET}/ "
-    exit 1
-fi
-
-LOG="rclone_copy_$(date +%Y%m%d_%H%M%S).log"
-
-###########################################
-# Summary
-###########################################
-
-echo
-echo "=============================================="
-echo "              RCLONE COPY"
-echo "=============================================="
-echo "Started          : $(date)"
-echo "Job ID           : ${SLURM_JOB_ID:-manual}"
-echo "Source           : $SOURCE"
-echo "Profile          : $PROFILE"
-echo "Bucket           : $BUCKET"
-echo "Destination path : $DEST_PATH"
-echo "Full destination : $DEST"
-echo "Log file         : $LOG"
-
-if [[ -n "$DRY_RUN" ]]; then
-    echo "Mode             : DRY RUN"
-else
-    echo "Mode             : COPY"
-fi
-
-echo "=============================================="
-
-###########################################
-# Run rclone copy
-###########################################
-
-rclone copy "$SOURCE" "$DEST" \
-    ${DRY_RUN} \
-    --progress \
-    --checksum \
-    --create-empty-src-dirs \
-    --log-file="$LOG" \
-    --log-level=INFO
-
-###########################################
-# Finish
-###########################################
-
-echo
-echo "=============================================="
-
-if [[ -n "$DRY_RUN" ]]; then
-    echo "Dry run completed successfully."
-    echo "No files were copied."
-else
-    echo "Copy completed successfully."
-fi
-
-echo "Finished : $(date)"
-echo "Log file : $LOG"
-echo "=============================================="
+bash "${SCRIPT_DIR}/transfer-acacia-local.sh" "$@"
